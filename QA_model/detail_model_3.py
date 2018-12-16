@@ -13,6 +13,8 @@ class FlowQA(nn.Module):
     def __init__(self, opt, embedding=None, padding_idx=0):
         super(FlowQA, self).__init__()
 
+        print("This is model_3")
+
         # Input size to RNN: word emb + char emb + question emb + manual features
         doc_input_size = 0
         que_input_size = 0
@@ -77,34 +79,41 @@ class FlowQA(nn.Module):
         doc_hidden_size, que_hidden_size = doc_input_size, que_input_size
         print('Initially, the vector_sizes [doc, query] are', doc_hidden_size, que_hidden_size)
 
-        flow_size = opt['hidden_size']
+        # flow_size = opt['hidden_size']
+        flow_size = opt['hidden_size'] * 2
 
         # RNN document encoder
         self.doc_rnn1 = layers.StackedBRNN(doc_hidden_size, opt['hidden_size'], num_layers=1)
-        self.dialog_flow1 = layers.StackedBRNN(opt['hidden_size'] * 2, opt['hidden_size'], num_layers=1, rnn_type=nn.GRU, bidir=False)
-        self.doc_rnn2 = layers.StackedBRNN(opt['hidden_size'] * 2 + flow_size + CoVe_size, opt['hidden_size'], num_layers=1)
-        self.dialog_flow2 = layers.StackedBRNN(opt['hidden_size'] * 2, opt['hidden_size'], num_layers=1, rnn_type=nn.GRU, bidir=False)
+        # self.dialog_flow1 = layers.StackedBRNN(opt['hidden_size'] * 2, opt['hidden_size'], num_layers=1, rnn_type=nn.GRU, bidir=False)
+        self.doc_rnn2 = layers.StackedBRNN(opt['hidden_size'] * 2 + flow_size, opt['hidden_size'], num_layers=1)
+        # self.dialog_flow2 = layers.StackedBRNN(opt['hidden_size'] * 2, opt['hidden_size'], num_layers=1, rnn_type=nn.GRU, bidir=False)
+        self.doc_rnn3 = layers.StackedBRNN(opt['hidden_size'] * 2 + flow_size + CoVe_size, opt['hidden_size'], num_layers=1)
         doc_hidden_size = opt['hidden_size'] * 2
 
         # RNN question encoder
+        # self.question_rnn, que_hidden_size = layers.RNN_from_opt(que_hidden_size, opt['hidden_size'], opt,
+        #                                                          num_layers=2, concat_rnn=opt['concat_rnn'], add_feat=CoVe_size)
         self.question_rnn, que_hidden_size = layers.RNN_from_opt(que_hidden_size, opt['hidden_size'], opt,
-                                                                 num_layers=2, concat_rnn=opt['concat_rnn'], add_feat=CoVe_size)
+                                                                 num_layers=3, concat_rnn=opt['concat_rnn'], add_feat=CoVe_size)
 
         # Output sizes of rnn encoders
         print('After Input LSTM, the vector_sizes [doc, query] are [', doc_hidden_size, que_hidden_size, '] * 2')
 
         # Deep inter-attention
-        self.deep_attn = layers.DeepAttention(opt, abstr_list_cnt=2, deep_att_hidden_size_per_abstr=opt['deep_att_hidden_size_per_abstr'],
+        # self.deep_attn = layers.DeepAttention(opt, abstr_list_cnt=2, deep_att_hidden_size_per_abstr=opt['deep_att_hidden_size_per_abstr'],
+        #                                       do_similarity=opt['deep_inter_att_do_similar'], word_hidden_size=embedding_dim + CoVe_size, no_rnn=True)
+        self.deep_attn = layers.DeepAttention(opt, abstr_list_cnt=3, deep_att_hidden_size_per_abstr=opt['deep_att_hidden_size_per_abstr'],
                                               do_similarity=opt['deep_inter_att_do_similar'], word_hidden_size=embedding_dim + CoVe_size, no_rnn=True)
 
         self.deep_attn_rnn, doc_hidden_size = layers.RNN_from_opt(self.deep_attn.att_final_size + flow_size, opt['hidden_size'], opt, num_layers=1)
         self.dialog_flow3 = layers.StackedBRNN(doc_hidden_size, opt['hidden_size'], num_layers=1, rnn_type=nn.GRU, bidir=False)
 
         # Question understanding and compression
-        self.high_lvl_qrnn, que_hidden_size = layers.RNN_from_opt(que_hidden_size * 2, opt['hidden_size'], opt, num_layers=1, concat_rnn=True)
+        # self.high_lvl_qrnn, que_hidden_size = layers.RNN_from_opt(que_hidden_size * 2, opt['hidden_size'], opt, num_layers=1, concat_rnn=True)
+        self.high_lvl_qrnn, que_hidden_size = layers.RNN_from_opt(que_hidden_size * 3, opt['hidden_size'], opt, num_layers=1, concat_rnn=True)
 
         # Self attention on context
-        att_size = doc_hidden_size + 2 * opt['hidden_size'] * 2  # baseline
+        att_size = doc_hidden_size + 3 * opt['hidden_size'] * 2  # baseline
         # att_size = doc_hidden_size + 2 * opt['hidden_size'] * 2 + doc_hidden_size  # version1.1
 
         if opt['self_attention_opt'] > 0:
@@ -131,7 +140,10 @@ class FlowQA(nn.Module):
         self.ans_type_prediction = layers.BilinearLayer(doc_hidden_size * 2, que_hidden_size, opt['answer_type_num'])
 
         """ @Spark Jiao """
-        self.iterator = layers.DocumentAttn(doc_hidden_size, opt['hidden_size'])
+        self.iterator1 = layers.DocumentAttn(doc_hidden_size, opt['hidden_size'])
+        self.iterator2 = layers.DocumentAttn(doc_hidden_size, opt['hidden_size'])
+        self.iterator3 = layers.DocumentAttn(doc_hidden_size, opt['hidden_size'])
+        self.iterator4 = layers.DocumentAttn(doc_hidden_size, opt['hidden_size'])
 
         # Store config
         self.opt = opt
@@ -278,16 +290,36 @@ class FlowQA(nn.Module):
             # [bsz * max_qa_pair, context_length, flow_hidden_state_dim]
             return flow_out
 
+        # @Spark Jiao
+        def DocAtt(c, c_mask, iterator):
+            batch_size, max_qa_pair, context_length = x1_full.size()
+            c_in = c.reshape(batch_size, max_qa_pair, context_length, -1).transpose(0, 1)
+            mask = c_mask.reshape(batch_size, max_qa_pair, context_length).transpose(0, 1)
+            out = [c_in[0]]
+            for i in range(1, max_qa_pair, 1):
+                z = out[-1]
+                out.append(iterator(z, c_in[i], mask[i]))
+            for i in range(max_qa_pair):
+                out[i] = out[i].unsqueeze(0)
+            c_out = torch.cat(out, dim=0).transpose(0, 1).reshape(batch_size * max_qa_pair, context_length, -1)
+            return c_out
+
         # Encode document with RNN
         doc_abstr_ls = []
 
         doc_hiddens = self.doc_rnn1(x1_input, x1_mask)
-        doc_hiddens_flow = flow_operation(doc_hiddens, self.dialog_flow1)
+        # doc_hiddens_flow = flow_operation(doc_hiddens, self.dialog_flow1)
+        doc_hiddens_flow = DocAtt(doc_hiddens, x1_mask, self.iterator1)
 
         doc_abstr_ls.append(doc_hiddens)
 
-        doc_hiddens = self.doc_rnn2(torch.cat((doc_hiddens, doc_hiddens_flow, x1_cove_high_expand), dim=2), x1_mask)
-        doc_hiddens_flow = flow_operation(doc_hiddens, self.dialog_flow2)
+        doc_hiddens = self.doc_rnn2(torch.cat((doc_hiddens, doc_hiddens_flow), dim=2), x1_mask)
+        doc_hiddens_flow = DocAtt(doc_hiddens, x1_mask, self.iterator2)
+        doc_abstr_ls.append(doc_hiddens)
+
+        doc_hiddens = self.doc_rnn3(torch.cat((doc_hiddens, doc_hiddens_flow, x1_cove_high_expand), dim=2), x1_mask)
+        # doc_hiddens_flow = flow_operation(doc_hiddens, self.dialog_flow2)
+        doc_hiddens_flow = DocAtt(doc_hiddens, x1_mask, self.iterator3)
         doc_abstr_ls.append(doc_hiddens)
 
         # with open('flow_bef_att.pkl', 'wb') as output:
@@ -307,23 +339,10 @@ class FlowQA(nn.Module):
                                   [torch.cat([x2_emb, x2_cove_high], 2)], que_abstr_ls, x1_mask, x2_mask)
 
         doc_hiddens = self.deep_attn_rnn(torch.cat((doc_info, doc_hiddens_flow), dim=2), x1_mask)
-        doc_hiddens_flow = flow_operation(doc_hiddens, self.dialog_flow3)
+        # doc_hiddens_flow = flow_operation(doc_hiddens, self.dialog_flow3)
+        doc_hiddens_flow = DocAtt(doc_hiddens, x1_mask, self.iterator4)
 
         doc_abstr_ls += [doc_hiddens]
-
-        # @Spark Jiao
-        def DocAtt(c, c_mask, iterator):
-            batch_size, max_qa_pair, context_length = x1_full.size()
-            c_in = c.reshape(batch_size, max_qa_pair, context_length, -1).transpose(0, 1)
-            mask = c_mask.reshape(batch_size, max_qa_pair, context_length).transpose(0, 1)
-            out = [c_in[0]]
-            for i in range(1, max_qa_pair, 1):
-                z = out[-1]
-                out.append(iterator(z, c_in[i], mask[i]))
-            for i in range(max_qa_pair):
-                out[i] = out[i].unsqueeze(0)
-            c_out = torch.cat(out, dim=0).transpose(0, 1).reshape(batch_size * max_qa_pair, context_length, -1)
-            return c_out
 
         # doc_hiddens = DocAtt(doc_hiddens, x1_mask, self.iterator)  # version1.1
         # doc_abstr_ls += [doc_hiddens]  # version1.1
