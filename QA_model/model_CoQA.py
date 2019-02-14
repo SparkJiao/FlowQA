@@ -22,7 +22,10 @@ from QA_model import detail_model_9
 from QA_model import detail_model_10
 from QA_model import detail_model_11
 from QA_model import detail_model_12
-
+from QA_model import detail_model_13
+from QA_model import detail_model_14
+from QA_model import detail_model_15
+from QA_model import infer_model1
 
 from QA_model.loss_fun import f1_loss
 
@@ -69,7 +72,15 @@ class QAModel(object):
         elif opt['model_id'] == 11:
             self.network = detail_model_11.FlowQA(opt, embedding)
         elif opt['model_id'] == 12:
-            self.network = detail_model_11.FlowQA(opt, embedding)
+            self.network = detail_model_12.FlowQA(opt, embedding)
+        elif opt['model_id'] == 13:
+            self.network = detail_model_13.FlowQA(opt, embedding)
+        elif opt['model_id'] == 14:
+            self.network = detail_model_14.FlowQA(opt, embedding)
+        elif opt['model_id'] == 15:
+            self.network = detail_model_15.FlowQA(opt, embedding)
+        elif opt['model_id'] == 16:
+            self.network = infer_model1.InferQA(opt, embedding)
         if state_dict:
             new_state = set(self.network.state_dict().keys())
             for k in list(state_dict['network'].keys()):
@@ -104,9 +115,30 @@ class QAModel(object):
         self.network.train()
         torch.set_grad_enabled(True)
 
+        # # Transfer to GPU
+        # if self.opt['cuda']:
+        #     inputs = [e.cuda(non_blocking=True) for e in batch[:9]]
+        #     overall_mask = batch[9].cuda(non_blocking=True)
+        #
+        #     answer_s = batch[10].cuda(non_blocking=True)
+        #     answer_e = batch[11].cuda(non_blocking=True)
+        #     answer_c = batch[12].cuda(non_blocking=True)
+        #     rationale_s = batch[13].cuda(non_blocking=True)
+        #     rationale_e = batch[14].cuda(non_blocking=True)
+        # else:
+        #     inputs = [e for e in batch[:9]]
+        #     overall_mask = batch[9]
+        #
+        #     answer_s = batch[10]
+        #     answer_e = batch[11]
+        #     answer_c = batch[12]
+        #     rationale_s = batch[13]
+        #     rationale_e = batch[14]
+
+        # Batch with answers as input
         # Transfer to GPU
         if self.opt['cuda']:
-            inputs = [e.cuda(non_blocking=True) for e in batch[:9]]
+            inputs = [e.cuda(non_blocking=True) for e in batch[:9] + batch[-3:]]
             overall_mask = batch[9].cuda(non_blocking=True)
 
             answer_s = batch[10].cuda(non_blocking=True)
@@ -115,7 +147,7 @@ class QAModel(object):
             rationale_s = batch[13].cuda(non_blocking=True)
             rationale_e = batch[14].cuda(non_blocking=True)
         else:
-            inputs = [e for e in batch[:9]]
+            inputs = [e for e in batch[:9] + batch[-3:]]
             overall_mask = batch[9]
 
             answer_s = batch[10]
@@ -185,11 +217,18 @@ class QAModel(object):
             self.update_eval_embed()
             self.eval_embed_transfer = False
 
-        # Transfer to GPU
+        # # Transfer to GPU
         if self.opt['cuda']:
             inputs = [e.cuda(non_blocking=True) for e in batch[:9]]
         else:
             inputs = [e for e in batch[:9]]
+
+        # Batch with answers
+        # Transfer to GPU
+        # if self.opt['cuda']:
+        #     inputs = [e.cuda(non_blocking=True) for e in batch[:9] + batch[-3:]]
+        # else:
+        #     inputs = [e for e in batch[:9] + batch[-3:]]
 
         # Run forward
         # output: [batch_size, question_num, context_len], [batch_size, question_num]

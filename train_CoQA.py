@@ -14,7 +14,8 @@ import pandas as pd
 import numpy as np
 from QA_model.model_CoQA import QAModel
 from CoQA_eval import CoQAEvaluator
-from general_utils import find_best_score_and_thresh, BatchGen_CoQA
+# from general_utils import find_best_score_and_thresh, BatchGen_CoQA
+from general_utils_a import BatchGen_CoQA
 
 parser = argparse.ArgumentParser(
     description='Train a Dialog QA model.'
@@ -269,7 +270,8 @@ def load_train_data(opt):
                         data['context'],
                         data['context_span'],
                         data['1st_question'],
-                        data['context_tokenized'])),
+                        data['context_tokenized'],
+                        data['context_string'])),
              'qa': list(zip(
                         data['question_CID'],
                         data['question_ids'],
@@ -279,9 +281,14 @@ def load_train_data(opt):
                         data['rationale_start'],
                         data['rationale_end'],
                         data['answer_choice'],
-                        data['question'],
+                        data['q_text'],
                         data['answer'],
-                        data['question_tokenized']))
+                        data['question_tokenized'],
+                        data['a_text'],
+                        data['answer_tokenized'],
+                        data['answer_ids'],
+                        data['question_string'],
+                        data['answer_string']))
             }
     return train, embedding, opt
 
@@ -304,7 +311,8 @@ def load_dev_data(opt): # can be extended to true test set
                         data['context'],
                         data['context_span'],
                         data['1st_question'],
-                        data['context_tokenized'])),
+                        data['context_tokenized'],
+                        data['context_string'])),
            'qa': list(zip(
                         data['question_CID'],
                         data['question_ids'],
@@ -314,9 +322,14 @@ def load_dev_data(opt): # can be extended to true test set
                         data['rationale_start'],
                         data['rationale_end'],
                         data['answer_choice'],
-                        data['question'],
+                        data['q_text'],
                         data['answer'],
-                        data['question_tokenized']))
+                        data['question_tokenized'],
+                        data['a_text'],
+                        data['answer_tokenized'],
+                        data['answer_ids'],
+                        data['question_string'],
+                        data['answer_string']))
           }
 
     return dev, embedding

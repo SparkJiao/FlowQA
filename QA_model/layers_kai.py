@@ -2,7 +2,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .layers import AttentionScore
+from allennlp.nn import util
+
+from .layers import AttentionScore, StackedBRNN
 
 
 class DocumentAttnOverAttn(nn.Module):
@@ -30,6 +32,8 @@ class DocumentAttnOverAttn(nn.Module):
             return self.forward_add_gates(c1, c2, c_mask)
         elif flag == 6:
             return self.forward_simple_gates(c1, c2, c_mask)
+        elif flag == 7:
+            return self.forward_interact_gate(c1, c2)
 
     def forward_cat(self, c1, c2, c_mask):
         scores = self.scoring(c2, c1)
@@ -134,6 +138,48 @@ class DocumentAttnOverAttn(nn.Module):
 
         return fused_c1 + fused_c2
 
+    def forward_interact_gate(self, c1, c2):
+
+        fused_c2 = self.input_gate(c1, c2)
+        fused_c1 = self.input_gate(c2, c1)
+        return fused_c1 + fused_c2
+
+
+class BiDAF(nn.Module):
+    def __init__(self, input_dim, hidden_size, att_hidden_size, use_self_att: bool = False, similarity_attention: bool = False):
+        super(BiDAF, self).__init__()
+        self.input_dim = input_dim
+        self.use_self_att = use_self_att
+        self.scoring = AttentionScore(input_dim, att_hidden_size, similarity_score=similarity_attention)
+        self.linear = nn.Linear(input_dim * 4, input_dim)
+        self.residual_layer = StackedBRNN(input_dim, hidden_size, num_layers=1)
+
+    def forward(self, passage, question, passage_mask, question_mask):
+        # batch * len_d * len_q
+        scores = self.scoring(passage, question)
+
+        # b * d * q
+        question_mask = question_mask.unsqueeze(1).expand_as(scores)
+        alpha_scores = scores.data.masked_fill(question_mask.data, -float('inf'))
+        alpha = F.softmax(alpha_scores, dim=2)
+        # b * d * h
+        passage_question_vectors = alpha.bmm(question)
+
+        # b * d
+        beta_masked_scores = alpha_scores.max(dim=-1)[0].squeeze(-1)
+        beta_scores = beta_masked_scores.data.masked_fill(passage_mask.data, -float('inf'))
+        beta = F.softmax(beta_scores, dim=1)
+        # b * 1 * h
+        question_passage_vector = beta.unsqueeze(1).bmm(passage)
+        # b * d * h
+        tiled_question_passage_vector = question_passage_vector.expand_as(passage)
+
+        final_merged_passage = F.relu(self.linear(torch.cat([passage, passage_question_vectors,
+                                                             passage * passage_question_vectors, passage * tiled_question_passage_vector], dim=2)))
+        residual_layer = self.residual_layer(final_merged_passage)
+        # return torch.cat([residual_layer, passage_question_vectors], dim=2) # detail model 14
+        return residual_layer
+
 
 class MultiHeadSelfAtt(nn.Module):
     def __init__(self, input_size, num_head=5):
@@ -209,3 +255,32 @@ class FusionLayer(nn.Module):
         gated = self.sigmoid(self.linear_g(z))
         fusion = self.tanh(self.linear_f(z))
         return gated * fusion + (1 - gated) * x
+
+
+""" ******************************** """
+
+
+class ConversationAtt(nn.Module):
+    def __init__(self, input_size, hidden_size):
+        super(ConversationAtt, self).__init__()
+        self.att_score = AttentionScore(input_size, hidden_size, similarity_score=False)
+
+    def forward(self, x, mask):
+        """
+        :param x: [batch_size, max_qa_count, passage_length, encoding_dim]
+        :param mask: [batch_size, max_qa_count, passage_length]
+        :return:
+        """
+        batch_size, max_qa_count, passage_length, encoding_dim = x.size()
+        xx = x.transpose(1, 2).reshape(batch_size * passage_length, max_qa_count, encoding_dim)
+
+        tri_mask = torch.ones((max_qa_count, max_qa_count), device=mask.device, dtype=torch.uint8).triu(diagonal=0)
+
+        # batch_size * passage_length, max_qa_count, max_qa_count
+        score = self.att_score(xx, xx)
+        score_mask = (mask.transpose(1, 2).reshape(batch_size * passage_length, max_qa_count).unsqueeze(1).expand(score.size())) * tri_mask
+        score.masked_fill_(score_mask, -float('inf'))
+        prob = F.softmax(score, dim=2)
+        y = prob.bmm(xx).reshape(batch_size, passage_length, max_qa_count, -1).transpose(1, 2)
+        y = y.reshape(batch_size * max_qa_count, passage_length, encoding_dim)
+        return y

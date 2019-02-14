@@ -414,6 +414,62 @@ class LinearSelfAttn(nn.Module):
         return alpha
 
 
+class MultiHeadSelfAttn(nn.Module):
+    """docstring for MultiHeadSelfAttn"""
+
+    def __init__(self, input_size, head_num):
+        super(MultiHeadSelfAttn, self).__init__()
+        hidden_size = int(input_size / head_num)
+        self.head_num = head_num
+
+        print('head num: %d, input size: %d, hidden size: %d' % (head_num, input_size, hidden_size))
+
+        self.input_layers = nn.ModuleList()
+        self.score_layers = nn.ModuleList()
+        for i in range(head_num):
+            self.input_layers.append(nn.Sequential(nn.Linear(input_size, hidden_size),
+                                                   nn.ReLU(),
+                                                   nn.Linear(hidden_size, hidden_size),
+                                                   nn.Tanh()))
+            self.score_layers.append(nn.Linear(hidden_size, 1))
+
+    def forward(self, x, x_mask, return_scores=False):
+        """
+        x = batch * len * hdim
+        x_mask = batch * len
+        """
+        x = dropout(x, p=my_dropout_p, training=self.training)
+        attention = []
+        scores = []
+        for i in range(self.head_num):
+            x_ = self.input_layers[i](x)
+            score = self.score_layers[i](x_).squeeze(2)
+            score.data.masked_fill_(x_mask.data, -float('inf'))
+            alpha = F.softmax(score, dim=1).unsqueeze(2)
+            scores.append(alpha)
+            attention.append((x_ * alpha).sum(1))
+        attention = torch.cat(attention, dim=1)
+        scores = torch.cat(scores, dim=2)
+        if return_scores:
+            return attention, scores  # batch * input_size, batch * length * head_num
+        return attention
+
+    def get_penalty(self, scores):
+        '''
+        scores: batch * len * head_num
+        '''
+        batch, length, head_num = scores.size()
+        ATA = torch.bmm(scores.transpose(1, 2), scores)
+        ATA_E = ATA - torch.eye(head_num).unsqueeze(0).repeat(batch, 1, 1)
+
+        det = []
+        for i in range(batch):
+            det.append(torch.det(ATA_E[i]))
+        penalty = sum(det) / batch
+
+        return penalty  # scalar
+
+
 # For attending the span in document from the query
 class BilinearSeqAttn(nn.Module):
     """A bilinear attention layer over a sequence X w.r.t y:
@@ -494,6 +550,100 @@ class BilinearLayer(nn.Module):
         Wy = Wy.view(Wy.size(0), self.class_num, x.size(1))
         xWy = torch.sum(x.unsqueeze(1).expand_as(Wy) * Wy, dim=2)
         return xWy.squeeze(-1)  # size = batch * class_num
+
+
+class InferModule(nn.Module):
+    """docstring for InferModule"""
+
+    def __init__(self, hidden_size):
+        super(InferModule, self).__init__()
+        self.input_gate = nn.Sequential(nn.Linear(2 * hidden_size, hidden_size),
+                                        nn.ReLU(),
+                                        nn.Linear(hidden_size, hidden_size),
+                                        nn.ReLU(),
+                                        nn.Linear(hidden_size, hidden_size),
+                                        nn.Tanh())
+        self.output_gate = nn.Sequential(nn.Linear(2 * hidden_size, hidden_size),
+                                         nn.ReLU(),
+                                         nn.Linear(hidden_size, hidden_size),
+                                         nn.ReLU(),
+                                         nn.Linear(hidden_size, hidden_size),
+                                         nn.Sigmoid())
+        self.self_gate = nn.Sequential(nn.Linear(hidden_size, hidden_size),
+                                       nn.ReLU(),
+                                       nn.Linear(hidden_size, hidden_size),
+                                       nn.ReLU(),
+                                       nn.Linear(hidden_size, hidden_size),
+                                       nn.Tanh())
+
+        self.affector = nn.Sequential(nn.Linear(hidden_size, hidden_size),
+                                      nn.ReLU(),
+                                      nn.Linear(hidden_size, hidden_size),
+                                      nn.ReLU(),
+                                      nn.Linear(hidden_size, hidden_size),
+                                      nn.Tanh())
+
+    def forward(self, slots, state):
+        '''
+        slots: batch * slots_num * hidden_size
+        state: batch * hidden_size
+        return new_state(batch * hidden_size) and state(batch * hidden_size)
+        '''
+        batch, slots_num, hidden_size = slots.size()
+        slots = torch.cat([slots, state.unsqueeze(1).repeat(1, slots_num, 1)], 2)
+        input_value = self.input_gate(slots)
+        output_gate = self.output_gate(slots)
+        slots_output = (input_value * output_gate).sum(1)
+        new_state = slots_output + self.self_gate(state) * (1. - output_gate.sum(1))
+        new_state = self.affector(new_state)
+
+        return new_state, state
+
+
+class FuseModule(nn.Module):
+    """docstring for FuseModule"""
+
+    def __init__(self, input_size, output_size):
+        super(FuseModule, self).__init__()
+        self.attention_gate = nn.Sequential(nn.Linear(input_size, output_size),
+                                            nn.ReLU(),
+                                            nn.Linear(output_size, output_size),
+                                            nn.ReLU(),
+                                            nn.Linear(output_size, output_size),
+                                            nn.Sigmoid())
+
+    def forward(self, slot, state):
+        '''
+        slot: batch * output_size
+        state: batch * length * state_size
+        return new_state(batch * length * output_size)
+        '''
+        batch, length, _ = state.size()
+        slot = slot.unsqueeze(1).repeat(1, length, 1)
+        slot_state = torch.cat([slot, state], 2)  # batch * length * input_size
+
+        return self.attention_gate(slot_state) * slot
+
+
+class CombineModule(nn.Module):
+    """docstring for CombineModule"""
+
+    def __init__(self, input_size):
+        super(CombineModule, self).__init__()
+        self.attention_gate = nn.Sequential(nn.Linear(input_size, input_size),
+                                            nn.ReLU(),
+                                            nn.Linear(input_size, input_size),
+                                            nn.ReLU(),
+                                            nn.Linear(input_size, input_size))
+
+    def forward(self, states):
+        '''
+        states: batch * state_num * input_size
+        '''
+        weights = self.attention_gate(states)  # batch * state_num * input_size
+        scores = F.softmax(weights, dim=1)  # batch * state_num * input_size
+
+        return (scores * states).sum(1)  # batch * input_size
 
 
 # ------------------------------------------------------------------------------

@@ -46,12 +46,30 @@ matrix attention + two input gates
 
 ### version9
 
-version8 with three times iteration
+version8 with three times iteration  
+76.433  
 
 ### version10
 
-add two gates of version8
+add two gates of version8  
+75.860  
 
 ### version11
 
-add two gates simple
+add two gates simple  
+75.949
+
+### version12
+
+just concat  
+75.545  
+
+### version13 
+
+another gate    
+74.868  
+
+### version4
+
+add bidaf module   
+76.760  
